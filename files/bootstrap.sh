@@ -180,38 +180,6 @@ SERVICE_IPV6_CIDR="${SERVICE_IPV6_CIDR:-}"
 ENABLE_LOCAL_OUTPOST="${ENABLE_LOCAL_OUTPOST:-}"
 CLUSTER_ID="${CLUSTER_ID:-}"
 
-function get_pause_container_account_for_region () {
-    local region="$1"
-    case "${region}" in
-    ap-east-1)
-        echo "${PAUSE_CONTAINER_ACCOUNT:-800184023465}";;
-    me-south-1)
-        echo "${PAUSE_CONTAINER_ACCOUNT:-558608220178}";;
-    cn-north-1)
-        echo "${PAUSE_CONTAINER_ACCOUNT:-918309763551}";;
-    cn-northwest-1)
-        echo "${PAUSE_CONTAINER_ACCOUNT:-961992271922}";;
-    us-gov-west-1)
-        echo "${PAUSE_CONTAINER_ACCOUNT:-013241004608}";;
-    us-gov-east-1)
-        echo "${PAUSE_CONTAINER_ACCOUNT:-151742754352}";;
-    us-iso-east-1)
-        echo "${PAUSE_CONTAINER_ACCOUNT:-725322719131}";;
-    us-isob-east-1)
-        echo "${PAUSE_CONTAINER_ACCOUNT:-187977181151}";;
-    af-south-1)
-        echo "${PAUSE_CONTAINER_ACCOUNT:-877085696533}";;
-    eu-south-1)
-        echo "${PAUSE_CONTAINER_ACCOUNT:-590381155156}";;
-    ap-southeast-3)
-        echo "${PAUSE_CONTAINER_ACCOUNT:-296578399912}";;
-    me-central-1)
-        echo "${PAUSE_CONTAINER_ACCOUNT:-759879836304}";;  
-    *)
-        echo "${PAUSE_CONTAINER_ACCOUNT:-602401143452}";;
-    esac
-}
-
 # Helper function which calculates the amount of the given resource (either CPU or memory)
 # to reserve in a given resource range, specified by a start and end of the range and a percentage
 # of the resource to reserve. Note that we return zero if the start of the resource range is
@@ -298,6 +266,11 @@ fi
 
 AWS_DEFAULT_REGION=$(imds 'latest/dynamic/instance-identity/document' | jq .region -r)
 AWS_SERVICES_DOMAIN=$(imds 'latest/meta-data/services/domain')
+################################################################################
+### Update Packages Related to Security {"optimization": "tuned-cloud-init"} ###
+################################################################################
+# yum -t -y --exclude=kernel --exclude='nvidia*' --exclude='cuda*' --security --sec-severity=critical --sec-severity=important upgrade &
+################################################################################
 
 MACHINE=$(uname -m)
 if [[ "$MACHINE" != "x86_64" && "$MACHINE" != "aarch64" ]]; then
@@ -305,8 +278,8 @@ if [[ "$MACHINE" != "x86_64" && "$MACHINE" != "aarch64" ]]; then
     exit 1
 fi
 
-PAUSE_CONTAINER_ACCOUNT=$(get_pause_container_account_for_region "${AWS_DEFAULT_REGION}")
-PAUSE_CONTAINER_IMAGE=${PAUSE_CONTAINER_IMAGE:-$PAUSE_CONTAINER_ACCOUNT.dkr.ecr.$AWS_DEFAULT_REGION.$AWS_SERVICES_DOMAIN/eks/pause}
+ECR_URI=$(/etc/eks/get-ecr-uri.sh "${AWS_DEFAULT_REGION}" "${AWS_SERVICES_DOMAIN}" "${PAUSE_CONTAINER_ACCOUNT:-}")
+PAUSE_CONTAINER_IMAGE=${PAUSE_CONTAINER_IMAGE:-$ECR_URI/eks/pause}
 PAUSE_CONTAINER="$PAUSE_CONTAINER_IMAGE:$PAUSE_CONTAINER_VERSION"
 
 ### kubelet kubeconfig
@@ -463,6 +436,13 @@ if is_greater_than_or_equal_to_version $KUBELET_VERSION "1.22.0"; then
 fi
 
 
+################################################################################
+### Disable LVM2 {"optimization": "increase-k8s-qps"} ##########################
+################################################################################
+## for K8s versions that suport API Priority & Fairness, increase our API server QPS
+# echo $(jq ".kubeAPIQPS=( .kubeAPIQPS // 10)|.kubeAPIBurst=( .kubeAPIBurst // 20)" $KUBELET_CONFIG) > $KUBELET_CONFIG
+################################################################################
+
 # Sets kubeReserved and evictionHard in /etc/kubernetes/kubelet/kubelet-config.json for worker nodes. The following two function
 # calls calculate the CPU and memory resources to reserve for kubeReserved based on the instance type of the worker node.
 # Note that allocatable memory and CPU resources on worker nodes is calculated by the Kubernetes scheduler
@@ -518,26 +498,23 @@ if [[ "$CONTAINER_RUNTIME" = "containerd" ]]; then
 
     sudo mkdir -p /etc/containerd
     sudo mkdir -p /etc/cni/net.d
-    mkdir -p /etc/systemd/system/containerd.service.d
-    cat <<EOF > /etc/systemd/system/containerd.service.d/10-compat-symlink.conf
-[Service]
-ExecStartPre=/bin/ln -sf /run/containerd/containerd.sock /run/dockershim.sock
-EOF
     if [[ -n "$CONTAINERD_CONFIG_FILE" ]]; then
         sudo cp -v $CONTAINERD_CONFIG_FILE /etc/eks/containerd/containerd-config.toml
     fi
     echo "$(jq '.cgroupDriver="systemd"' $KUBELET_CONFIG)" > $KUBELET_CONFIG
     sudo sed -i s,SANDBOX_IMAGE,$PAUSE_CONTAINER,g /etc/eks/containerd/containerd-config.toml
-    sudo cp -v /etc/eks/containerd/containerd-config.toml /etc/containerd/config.toml
-    sudo cp -v /etc/eks/containerd/sandbox-image.service /etc/systemd/system/sandbox-image.service
+    # Check if the same PAUSE container was used when building the AMI
+    # If different, then restart containerd w/ proper sandbox config
+    if ! cmp -s /etc/eks/containerd/containerd-config.toml /etc/containerd/config.toml; then
+        sudo cp -v /etc/eks/containerd/containerd-config.toml /etc/containerd/config.toml
+        sudo cp -v /etc/eks/containerd/sandbox-image.service /etc/systemd/system/sandbox-image.service
+        sudo chown root:root /etc/systemd/system/sandbox-image.service
+        systemctl daemon-reload
+        systemctl enable containerd sandbox-image
+        systemctl restart sandbox-image containerd
+    fi
     sudo cp -v /etc/eks/containerd/kubelet-containerd.service /etc/systemd/system/kubelet.service
     sudo chown root:root /etc/systemd/system/kubelet.service
-    sudo chown root:root /etc/systemd/system/sandbox-image.service
-    systemctl daemon-reload
-    systemctl enable containerd
-    systemctl restart containerd
-    systemctl enable sandbox-image
-    systemctl start sandbox-image
 
 elif [[ "$CONTAINER_RUNTIME" = "dockerd" ]]; then
     mkdir -p /etc/docker
@@ -599,3 +576,64 @@ if  command -v nvidia-smi &>/dev/null ; then
 else
     echo "nvidia-smi not found"
 fi
+
+################################################################################
+### VPC CNI Init {"optimization": "vpc-cni-init"} ##############################
+################################################################################
+# ## Configure rp_filter
+# echo "Configure rp_filter loose... "
+
+# HOST_IP=$(imds 'latest/meta-data/local-ipv4')
+# PRIMARY_MAC=$(imds 'latest/meta-data/mac')
+# PRIMARY_IF=$(ip -o link show | grep -F "link/ether $PRIMARY_MAC" | awk -F'[ :]+' '{print $2}')
+# sysctl -w "net.ipv4.conf.$PRIMARY_IF.rp_filter=2"
+# cat "/proc/sys/net/ipv4/conf/$PRIMARY_IF/rp_filter"
+
+# ## Set DISABLE_TCP_EARLY_DEMUX to true to enable kubelet to pod-eni TCP communication
+# ## https://lwn.net/Articles/503420/ and https://github.com/aws/amazon-vpc-cni-k8s/pull/1212 for background
+# if [ "${DISABLE_TCP_EARLY_DEMUX:-false}" == "true" ]; then
+#     sysctl -w "net.ipv4.tcp_early_demux=0"
+# else
+#     sysctl -e -w "net.ipv4.tcp_early_demux=1"
+# fi
+
+# ## If IPv6 is enabled, set `disable_ipv6` to `0` and ipv6 `forwarding` to `1`
+# ## We also set `accept_ra` to `2` on primary interface to allow it to honor RA packets.
+# if [ "${IP_FAMILY}" == "ipv6" ]; then
+#     sysctl -w "net.ipv6.conf.all.disable_ipv6=0"
+#     sysctl -w "net.ipv6.conf.all.forwarding=1"
+#     sysctl -w "net.ipv6.conf.$PRIMARY_IF.accept_ra=2"
+#     cat "/proc/sys/net/ipv6/conf/all/disable_ipv6"
+#     cat "/proc/sys/net/ipv6/conf/all/forwarding"
+#     cat "/proc/sys/net/ipv6/conf/$PRIMARY_IF/accept_ra"
+# fi
+
+# echo "VPC CNI init done"
+
+#################################################################################################
+### Update Packages Related to Security po {"optimization": "tuned-cloud-init"} #################
+#################################################################################################
+## wait on yum updates
+# wait
+# if ! needs-restarting --reboothint; then
+#     ## If the packages require a reboot
+#     needs-restarting
+# elif [[ $(needs-restarting -s) ]]; then
+#     ## restart any updated services
+#     ## but allow the restart to fail since
+#     ## some services can't be restarted like auditd
+#     systemctl try-restart $(needs-restarting -s) || :
+# fi
+# systemctl enable update-motd
+# systemctl start update-motd
+#################################################################################################
+
+#################################################################################################
+### Start Docker on Boot {"optimization": "cadvisor-docker"} ####################################
+#################################################################################################
+# sleep 10
+# systemctl disable docker docker.socket
+# systemctl stop docker docker.socket
+#################################################################################################
+
+echo "EKS Bootstrap finished successfully"

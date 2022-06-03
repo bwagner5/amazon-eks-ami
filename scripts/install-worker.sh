@@ -30,6 +30,8 @@ validate_env_set CNI_PLUGIN_VERSION
 validate_env_set KUBERNETES_VERSION
 validate_env_set KUBERNETES_BUILD_DATE
 validate_env_set PULL_CNI_FROM_GITHUB
+validate_env_set PAUSE_CONTAINER_VERSION
+validate_env_set KUBE_PROXY_VERSION_SUFFIX
 
 ################################################################################
 ### Machine Architecture #######################################################
@@ -62,7 +64,6 @@ sudo yum update -y
 # Install necessary packages
 sudo yum install -y \
     aws-cfn-bootstrap \
-    awscli \
     chrony \
     conntrack \
     curl \
@@ -119,6 +120,27 @@ sudo mkdir -p /etc/eks
 sudo mv $TEMPLATE_DIR/iptables-restore.service /etc/eks/iptables-restore.service
 
 ################################################################################
+### awscli #####################################################
+################################################################################
+
+if [[ "$BINARY_BUCKET_REGION" != "us-iso-east-1" && "$BINARY_BUCKET_REGION" != "us-isob-east-1" ]]; then
+    # https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html
+    echo "Installing awscli v2 bundle"
+    AWSCLI_DIR=$(mktemp -d)
+    curl \
+      --silent \
+      --show-error \
+      --retry 10 \
+      --retry-delay 1 \
+      -L "https://awscli.amazonaws.com/awscli-exe-linux-${MACHINE}.zip" -o "${AWSCLI_DIR}/awscliv2.zip"
+    unzip -q "${AWSCLI_DIR}/awscliv2.zip" -d ${AWSCLI_DIR}
+    sudo "${AWSCLI_DIR}/aws/install"
+else
+    echo "Installing awscli package"
+    sudo yum install -y awscli
+fi
+
+################################################################################
 ### Docker #####################################################################
 ################################################################################
 
@@ -152,19 +174,41 @@ if [[ "$INSTALL_DOCKER" == "true" ]]; then
 
     # Enable docker daemon to start on boot.
     sudo systemctl daemon-reload
+    #################################################################################################
+    ### Start Docker on Boot {"optimization": "cadvisor-docker"} ####################################
+    #################################################################################################
+    #sudo systemctl enable docker
+    #################################################################################################
 fi
 
 ###############################################################################
 ### Containerd setup ##########################################################
 ###############################################################################
 
+# install containerd and lock version
+# if docker is installed as well, this will run twice, but it's idempotent
+sudo yum install -y containerd-${CONTAINERD_VERSION}
+sudo yum versionlock containerd-*
+
 sudo mkdir -p /etc/eks/containerd
 if [ -f "/etc/eks/containerd/containerd-config.toml" ]; then
     ## this means we are building a gpu ami and have already placed a containerd configuration file in /etc/eks
     echo "containerd config is already present"
-else 
+else
     sudo mv $TEMPLATE_DIR/containerd-config.toml /etc/eks/containerd/containerd-config.toml
 fi
+
+#################################################################################################
+### Increase containerd max concurrent downloads {"optimization": "containerd-max-downloads"} ###
+#################################################################################################
+# sudo sed -i 's/max_concurrent_downloads = 3/max_concurrent_downloads = 10/g' /etc/eks/containerd/containerd-config.toml
+#################################################################################################
+
+sudo mkdir -p /etc/systemd/system/containerd.service.d
+cat <<EOF | sudo tee /etc/systemd/system/containerd.service.d/10-compat-symlink.conf
+[Service]
+ExecStartPre=/bin/ln -sf /run/containerd/containerd.sock /run/dockershim.sock
+EOF
 
 if [[ ! $KUBERNETES_VERSION =~ "1.19"* && ! $KUBERNETES_VERSION =~ "1.20"* && ! $KUBERNETES_VERSION =~ "1.21"* ]]; then
     # enable CredentialProviders features in kubelet-containerd service file
@@ -175,7 +219,9 @@ fi
 sudo mv $TEMPLATE_DIR/kubelet-containerd.service /etc/eks/containerd/kubelet-containerd.service
 sudo mv $TEMPLATE_DIR/sandbox-image.service /etc/eks/containerd/sandbox-image.service
 sudo mv $TEMPLATE_DIR/pull-sandbox-image.sh /etc/eks/containerd/pull-sandbox-image.sh
+sudo mv $TEMPLATE_DIR/pull-image.sh /etc/eks/containerd/pull-image.sh
 sudo chmod +x /etc/eks/containerd/pull-sandbox-image.sh
+sudo chmod +x /etc/eks/containerd/pull-image.sh
 
 cat <<EOF | sudo tee -a /etc/modules-load.d/containerd.conf
 overlay
@@ -188,6 +234,42 @@ net.bridge.bridge-nf-call-iptables = 1
 net.ipv4.ip_forward = 1
 EOF
 
+################################################################################
+### Kubelet without AWS Cloud Provider {"optimization": "no-cloud-provider"} ###
+################################################################################
+# sudo mv $TEMPLATE_DIR/kubelet-containerd-no-cloud-provider.service /etc/eks/containerd/kubelet-containerd.service
+
+################################################################################
+### Cirrus-Init (early userdata) {"optimization": "no-cloud-init"} #############
+################################################################################
+
+# sudo mv $TEMPLATE_DIR/cirrus-init.service /etc/systemd/system/cirrus-init.service
+# sudo mv $TEMPLATE_DIR/cirrus-init /etc/eks/cirrus-init
+# sudo chown root:root /etc/systemd/system/cirrus-init.service
+# sudo chmod +x /etc/eks/cirrus-init
+# sudo systemctl daemon-reload
+# sudo systemctl enable cirrus-init
+# sudo touch /etc/cloud/cloud-init.disabled
+
+################################################################################
+### Disable LVM2 {"optimization": "disable-lvm2"} ##############################
+################################################################################
+# sudo sed -i 's/use_lvmetad = 1/use_lvmetad = 0/g' /etc/lvm/lvm.conf
+# sudo systemctl stop lvm2-lvmetad.service lvm2-lvmetad.socket
+# sudo systemctl disable lvm2-lvmetad.service lvm2-lvmetad.socket
+# sudo systemctl mask lvm2-lvmetad.service lvm2-lvmetad.socket
+
+#################################################################################
+### Boot to multi-user rather than graphic {"optimization": "multi-user-boot"} #
+#################################################################################
+# sudo rm -f /etc/systemd/system/default.target
+# sudo ln -s /lib/systemd/system/multi-user.target /etc/systemd/system/default.target
+
+################################################################################
+### Install cloud-init config  {"optimization": "tuned-cloud-init"} ############
+################################################################################
+# sudo mv $TEMPLATE_DIR/cloud.cfg /etc/cloud/cloud.cfg
+# sudo systemctl disable update-motd
 
 ################################################################################
 ### Logrotate ##################################################################
@@ -303,6 +385,8 @@ sudo systemctl disable kubelet
 ################################################################################
 
 sudo mkdir -p /etc/eks
+sudo mv $TEMPLATE_DIR/get-ecr-uri.sh /etc/eks/get-ecr-uri.sh
+sudo chmod +x /etc/eks/get-ecr-uri.sh
 sudo mv $TEMPLATE_DIR/eni-max-pods.txt /etc/eks/eni-max-pods.txt
 sudo mv $TEMPLATE_DIR/bootstrap.sh /etc/eks/bootstrap.sh
 sudo chmod +x /etc/eks/bootstrap.sh
@@ -334,6 +418,72 @@ if [[ ! $KUBERNETES_VERSION =~ "1.19"* && ! $KUBERNETES_VERSION =~ "1.20"* && ! 
     # copying credential provider config file to eks folder
     sudo mv $TEMPLATE_DIR/ecr-credential-provider-config /etc/eks/ecr-credential-provider/ecr-credential-provider-config
 fi
+
+################################################################################
+### Cache Images {"optimization": "cached-imgs-containerd-prestart"} ###########
+################################################################################
+# if [[ "$CACHE_CONTAINER_IMAGES" = "true" && "$BINARY_BUCKET_REGION" != "us-iso-east-1" && "$BINARY_BUCKET_REGION" != "us-isob-east-1" ]]; then
+#     AWS_DOMAIN=$(imds 'latest/meta-data/services/domain')
+#     ECR_URI=$(/etc/eks/get-ecr-uri.sh "${BINARY_BUCKET_REGION}" "${AWS_DOMAIN}")
+
+#     PAUSE_CONTAINER="${ECR_URI}/eks/pause:${PAUSE_CONTAINER_VERSION}"
+#     KUBE_PROXY_IMG="${ECR_URI}/eks/kube-proxy:v${KUBERNETES_VERSION}-${KUBE_PROXY_VERSION_SUFFIX}"
+#     KUBE_PROXY_MINIMAL_IMG="${ECR_URI}/eks/kube-proxy:v${KUBERNETES_VERSION}-minimal-${KUBE_PROXY_VERSION_SUFFIX}"
+#     cat /etc/eks/containerd/containerd-config.toml | sed s,SANDBOX_IMAGE,$PAUSE_CONTAINER,g | sudo tee /etc/eks/containerd/containerd-cached-pause-config.toml
+#     sudo cp -v /etc/eks/containerd/containerd-cached-pause-config.toml /etc/containerd/config.toml
+
+#     sudo cp -v /etc/eks/containerd/sandbox-image.service /etc/systemd/system/sandbox-image.service
+#     sudo chown root:root /etc/systemd/system/sandbox-image.service
+#     sudo systemctl daemon-reload
+#     sudo systemctl start containerd
+#     sudo systemctl enable containerd sandbox-image
+
+#     #### Cache VPC CNI images starting with the addon default version and the latest version
+#     K8S_MINOR_VERSION=$(echo "${KUBERNETES_VERSION}" | cut -d'.' -f1-2)
+#     ADDON_VERSIONS=$(aws eks describe-addon-versions --addon-name vpc-cni --kubernetes-version=${K8S_MINOR_VERSION})
+#     DEFAULT_VPC_CNI_VERSION=$(echo "${ADDON_VERSIONS}" | jq -r '.addons[] .addonVersions[] | select(.compatibilities[] .defaultVersion==true).addonVersion')
+#     LATEST_VPC_CNI_VERSION=$(echo "${ADDON_VERSIONS}" | jq -r '.addons[] .addonVersions[] .addonVersion' | sort -V | tail -n1)
+#     CNI_IMG="${ECR_URI}/amazon-k8s-cni"
+#     CNI_INIT_IMG="${CNI_IMG}-init"
+#     CNI_IMGS=(
+#         ## Default VPC CNI Images
+#         "${CNI_IMG}:${DEFAULT_VPC_CNI_VERSION}" 
+#         "${CNI_INIT_IMG}:${DEFAULT_VPC_CNI_VERSION}"
+
+#         ## Latest VPC CNI Images
+#         "${CNI_IMG}:${LATEST_VPC_CNI_VERSION}" 
+#         "${CNI_INIT_IMG}:${LATEST_VPC_CNI_VERSION}"
+#     )
+
+#     CACHED_IMGS=(
+#         "${PAUSE_CONTAINER}" 
+#         "${KUBE_PROXY_IMG}" 
+#         "${KUBE_PROXY_MINIMAL_IMG}"
+#         ${CNI_IMGS[@]}
+#     )
+
+#     for img in "${CACHED_IMGS[@]}"; do
+#         /etc/eks/containerd/pull-image.sh "${img}"
+#     done
+
+#     #### Tag the pulled down image for all other regions in the partition
+#     for region in $(aws ec2 describe-regions --all-regions | jq -r '.Regions[] .RegionName'); do
+#         for img in "${CACHED_IMGS[@]}"; do
+#             regional_img="${img/$BINARY_BUCKET_REGION/$region}"
+#             sudo ctr -n k8s.io image tag "${img}" "${regional_img}" || :
+#             ## Tag ECR fips endpoint for supported regions
+#             if [[ "${region}" =~ (us-east-1|us-east-2|us-west-1|us-west-2|us-gov-east-1|us-gov-east-2) ]]; then
+#                 regional_fips_img="${regional_img/.ecr./.ecr-fips.}"
+#                 sudo ctr -n k8s.io image tag "${img}" "${regional_fips_img}" || :
+#                 sudo ctr -n k8s.io image tag "${img}" "${regional_fips_img/-eksbuild.1/}" || :
+#             fi
+#             ## Cache the non-addon VPC CNI images since "v*.*.*-eksbuild.1" is equivalent to leaving off the eksbuild suffix
+#             if [[ "${img}" == *"-cni"*"-eksbuild.1" ]]; then
+#                 sudo ctr -n k8s.io image tag "${img}" "${regional_img/-eksbuild.1/}" || :
+#             fi
+#         done
+#     done
+# fi
 
 ################################################################################
 ### SSM Agent ##################################################################

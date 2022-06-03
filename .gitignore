@@ -1,5 +1,9 @@
 *manifest.json
 *.swp
 .idea
+<<<<<<< HEAD
 *version-info.json
 .DS_Store
+=======
+*-version-info.json
+>>>>>>> 6c7d4b5 (optimizations)

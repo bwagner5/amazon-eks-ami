@@ -1,0 +1,12 @@
+[Unit]
+Description=Cirrus Init
+
+[Service]
+ExecStart=/bin/bash -c '/etc/eks/cirrus-init 2>&1 >> /var/log/cirrus-init.log'
+
+Restart=on-failure
+RestartSec=5
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
