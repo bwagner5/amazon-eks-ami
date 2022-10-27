@@ -2,3 +2,4 @@
 set -euo pipefail
 
 echo "mocking systemctl with $@"
+echo "systemctl $@" >> /tmp/systemctl-history

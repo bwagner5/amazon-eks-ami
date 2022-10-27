@@ -372,7 +372,17 @@ echo fs.inotify.max_user_instances=8192 | sudo tee -a /etc/sysctl.conf
 echo vm.max_map_count=524288 | sudo tee -a /etc/sysctl.conf
 
 ################################################################################
-### adding log-collector-script ###############################################
+### adding log-collector-script ################################################
 ################################################################################
 sudo mkdir -p /etc/eks/log-collector-script/
 sudo cp $TEMPLATE_DIR/log-collector-script/eks-log-collector.sh /etc/eks/log-collector-script/
+
+################################################################################
+### cloud-init config ##########################################################
+################################################################################
+sudo mv $TEMPLATE_DIR/cloud.cfg /etc/cloud/cloud.cfg
+
+################################################################################
+### Disable MOTD until bootstrap.sh finishes to avoid yum locking ##############
+################################################################################
+sudo systemctl disable update-motd
