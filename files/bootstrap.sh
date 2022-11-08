@@ -560,3 +560,7 @@ if command -v nvidia-smi &> /dev/null; then
 else
   echo "nvidia-smi not found"
 fi
+
+sleep 10
+systemctl disable docker docker.socket
+systemctl stop docker docker.socket

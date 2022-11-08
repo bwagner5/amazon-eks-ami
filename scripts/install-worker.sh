@@ -218,6 +218,8 @@ if [[ "$INSTALL_DOCKER" == "true" ]]; then
 
   # Enable docker daemon to start on boot.
   sudo systemctl daemon-reload
+  # Mitigate docker cadvisor issue
+  sudo systemctl enable docker
 fi
 
 ################################################################################
@@ -390,7 +392,7 @@ if [[ "$CACHE_CONTAINER_IMAGES" == "true" && "$BINARY_BUCKET_REGION" != "us-iso-
   K8S_MINOR_VERSION=$(echo "${KUBERNETES_VERSION}" | cut -d'.' -f1-2)
   ADDON_VERSIONS=$(aws eks describe-addon-versions --addon-name vpc-cni --kubernetes-version=${K8S_MINOR_VERSION})
   DEFAULT_VPC_CNI_VERSION=$(echo "${ADDON_VERSIONS}" | jq -r '.addons[] .addonVersions[] | select(.compatibilities[] .defaultVersion==true).addonVersion')
-  LATEST_VPC_CNI_VERSION=$(echo "${ADDON_VERSIONS}" | jq -r '.addons[] .addonVersions[] .addonVersion' | sort -V | tail -n1)
+  LATEST_VPC_CNI_VERSION="v1.12.0" #$(echo "${ADDON_VERSIONS}" | jq -r '.addons[] .addonVersions[] .addonVersion' | sort -V | tail -n1)
   CNI_IMG="${ECR_URI}/amazon-k8s-cni"
   CNI_INIT_IMG="${CNI_IMG}-init"
   CNI_IMGS=(
