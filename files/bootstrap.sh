@@ -135,11 +135,6 @@ set -- "${POSITIONAL[@]}" # restore positional parameters
 CLUSTER_NAME="$1"
 set -u
 
-# Updates security related packages
-# Previously executed before user-data in the 'package-update-upgrade-install' cloud-init-final module
-# Any updates requiring a service restart are restarted at the end of the bootstrap scripts
-yum -t -y --exclude=kernel --exclude='nvidia*' --exclude='cuda*' --security --sec-severity=critical --sec-severity=important upgrade &
-
 KUBELET_VERSION=$(kubelet --version | grep -Eo '[0-9]\.[0-9]+\.[0-9]+')
 echo "Using kubelet version $KUBELET_VERSION"
 
@@ -612,21 +607,3 @@ if command -v nvidia-smi &> /dev/null; then
 else
   echo "nvidia-smi not found"
 fi
-
-## wait on yum security updates
-wait
-## Check if a reboot is needed. If so, print why, but leave it to the user to reboot
-if ! needs-restarting --reboothint; then
-  ## print packages that require a reboot
-  needs-restarting
-## check if any systemd services need restarted
-elif [[ $(needs-restarting -s) ]]; then
-  ## restart any updated services
-  systemctl try-restart $(needs-restarting -s) || :
-fi
-
-# Usually, update-motd would try to check for security updates at the same time as user-data execution
-# This would result in yum locking and the bootstrap script taking a long time.
-# It is now disabled when the AMI is built and re-enabled here, after the node has been bootstrapped.
-systemctl enable update-motd
-systemctl start update-motd

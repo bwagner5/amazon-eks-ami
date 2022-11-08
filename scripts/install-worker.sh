@@ -381,8 +381,3 @@ sudo cp $TEMPLATE_DIR/log-collector-script/eks-log-collector.sh /etc/eks/log-col
 ### cloud-init config ##########################################################
 ################################################################################
 sudo mv $TEMPLATE_DIR/cloud.cfg /etc/cloud/cloud.cfg
-
-################################################################################
-### Disable MOTD until bootstrap.sh finishes to avoid yum locking ##############
-################################################################################
-sudo systemctl disable update-motd
