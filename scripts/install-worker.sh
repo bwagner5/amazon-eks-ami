@@ -393,16 +393,16 @@ if [[ "$CACHE_CONTAINER_IMAGES" == "true" && "$BINARY_BUCKET_REGION" != "us-iso-
   ADDON_VERSIONS=$(aws eks describe-addon-versions --addon-name vpc-cni --kubernetes-version=${K8S_MINOR_VERSION})
   DEFAULT_VPC_CNI_VERSION=$(echo "${ADDON_VERSIONS}" | jq -r '.addons[] .addonVersions[] | select(.compatibilities[] .defaultVersion==true).addonVersion')
   LATEST_VPC_CNI_VERSION="v1.12.0" #$(echo "${ADDON_VERSIONS}" | jq -r '.addons[] .addonVersions[] .addonVersion' | sort -V | tail -n1)
-  CNI_IMG="${ECR_URI}/amazon-k8s-cni"
-  CNI_INIT_IMG="${CNI_IMG}-init"
+  CNI_IMG="332273710158.dkr.ecr.us-west-2.amazonaws.com/vpc-cni"
+  CNI_INIT_IMG="${CNI_IMG}"
   CNI_IMGS=(
     ## Default VPC CNI Images
-    "${CNI_IMG}:${DEFAULT_VPC_CNI_VERSION}"
-    "${CNI_INIT_IMG}:${DEFAULT_VPC_CNI_VERSION}"
+    #"${CNI_IMG}:${DEFAULT_VPC_CNI_VERSION}"
+    #"${CNI_INIT_IMG}:${DEFAULT_VPC_CNI_VERSION}"
 
     ## Latest VPC CNI Images
-    "${CNI_IMG}:${LATEST_VPC_CNI_VERSION}"
-    "${CNI_INIT_IMG}:${LATEST_VPC_CNI_VERSION}"
+    "${CNI_IMG}:no-init"
+    "${CNI_INIT_IMG}:init-no-init"
   )
 
   CACHED_IMGS=(
