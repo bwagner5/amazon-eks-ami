@@ -411,6 +411,7 @@ if [[ "$CACHE_CONTAINER_IMAGES" == "true" && "$BINARY_BUCKET_REGION" != "us-iso-
   if [[ $(jq '.addons | length' <<< $VPC_CNI_ADDON_VERSIONS) -gt 0 ]]; then
     DEFAULT_VPC_CNI_VERSION=$(echo "${VPC_CNI_ADDON_VERSIONS}" | jq -r '.addons[] .addonVersions[] | select(.compatibilities[] .defaultVersion==true).addonVersion')
     LATEST_VPC_CNI_VERSION=$(echo "${VPC_CNI_ADDON_VERSIONS}" | jq -r '.addons[] .addonVersions[] .addonVersion' | sort -V | tail -n1)
+    BETWEEN_VPC_CNI_VERSIONS=($(echo "${VPC_CNI_ADDON_VERSIONS}" | jq -r '.addons[] .addonVersions[] .addonVersion' | sort -V | grep -B5 "${LATEST_VPC_CNI_VERSION}"))
     CNI_IMG="${ECR_URI}/amazon-k8s-cni"
     CNI_INIT_IMG="${CNI_IMG}-init"
 
@@ -423,6 +424,13 @@ if [[ "$CACHE_CONTAINER_IMAGES" == "true" && "$BINARY_BUCKET_REGION" != "us-iso-
       "${CNI_IMG}:${LATEST_VPC_CNI_VERSION}"
       "${CNI_INIT_IMG}:${LATEST_VPC_CNI_VERSION}"
     )
+    ## add versions between the default and latest
+    for version in "${BETWEEN_VPC_CNI_VERSIONS[@]}"; do
+      VPC_CNI_IMGS+=("${CNI_IMG}:${version}")
+      VPC_CNI_IMGS+=("${CNI_INIT_IMG}:${version}")
+    done
+    # uniq the images array
+    VPC_CNI_IMGS=($(for img in "${VPC_CNI_IMGS[@]}"; do echo "${img}"; done | sort -u))
   fi
 
   CACHE_IMGS=(
